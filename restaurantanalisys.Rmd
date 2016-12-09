@@ -1,0 +1,321 @@
+---
+title: "Restaurant"
+author: "Oriel Zambrano"
+date: "December 9, 2016"
+output: html_document
+---
+
+
+This is an  analysis for  [the code challenge](http://https://github.com/TOTVS/MDMStatic/tree/master/code-challenge) forecast
+
+Load and clean data
+
+```{r, echo=TRUE, warning=FALSE}
+setwd("~/Documents/Oriel/Notas fiscais")
+#LOAD DATA
+#first  i changed txt file to json file only modifing the extension
+#read text
+library(jsonlite)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(tidyverse)
+library(scales)
+library(ggthemes)
+jsonfile<-readLines("sample.json",skipNul = T)
+jsontovts<-fromJSON(paste(jsonfile, collapse = " "))
+
+#Get sales
+
+receita<-cbind(as.numeric(rownames(jsontovts$complemento)), jsontovts$complemento)
+names(receita)<- c("id", "vrTotal")
+
+#get and imput purchase dates  
+
+dates<-as.data.frame(jsontovts$ide$dhEmi$`$date`)
+names(dates)<-"purchasedatehour"
+receita<-cbind(receita,dates)
+#convert to date type and add time
+
+receita$purchasedate<-as.Date(receita$purchasedatehour, format="%Y-%m-%dT%H:%M")
+receita$purchasedatehour<-as.POSIXct(receita$purchasedatehour, format="%Y-%m-%dT%H:%M", tz = "GMT")
+receita$time<-format(as.POSIXct(receita$purchasedatehour, format="%Y-%m-%d %H:%M"), format="%H:%M")
+receita$hour<-as.numeric(format(as.POSIXct(receita$purchasedatehour, format="%Y-%m-%d %H:%M"), format="%H"))
+receita$minutes<-as.numeric(format(as.POSIXct(receita$purchasedatehour, format="%Y-%m-%d %H:%M"), format="%M"))
+receita$weekday<- weekdays(receita$purchasedate, abbreviate = T)
+receita$wday<-as.numeric(format(as.Date(receita$purchasedate),"%w"))
+receita$weeknum<-isoweek(ymd(receita$purchasedate))  
+
+
+#what table number
+receita$mesa<-as.numeric(gsub(jsontovts$infAdic$infCpl, pattern = "Mesa", replacement =""))
+  
+#mealtype  dinner or lunch Saturdays
+
+for(i in 1:length(receita$hour)) { 
+  if(receita$hour[i]<17) {receita$meal[i]<-"lunch"} else {receita$meal[i]<-"dinner"}
+}
+
+#extract data from orders.
+
+dflist<-jsontovts$dets
+for(i in 1:length(dflist)) { 
+  dflist[[i]]$prod$id<-i}  #introduce ID  for each order
+dfto<-list()
+for(i in 1:length(dflist)) {
+  dfto[[i]]<-dflist[[i]]$prod
+}
+
+ordersdf<-do.call(rbind, dfto) #create a data.frame
+
+sort(table(ordersdf$xProd), decreasing = T) #everybody ate buffet. So buffet price is sensible and important.
+
+
+productorder<-ordersdf %>% group_by(id,xProd) %>% summarise(qCom=sum(qCom)) %>% spread(xProd, qCom)
+productvalue<-ordersdf %>% group_by(id,xProd) %>% summarise(vProd=sum(vProd)) %>% spread(xProd, vProd)
+
+names(productorder)<- c("id"  ,           "AGUA"     ,      "BACARDI"  ,      "BUFFET"     ,    "BULE_CHA"    ,  "CAFE_EXPRESSO" ,
+"CAIPIRINHA"  ,   "CAIPIROSKA"   ,  "CERVEJA"     ,   "CERVEJA_LATA"  , "CHA"      ,      "DOCINHOS"      ,
+"HARUMAKI"    ,   "LIMONADA"     ,  "REFRIGERANTE"  , "SAKE"        ,   "SASHIMI"  ,      "SOBREMESA"    , 
+ "SUCO"        ,   "SUSHI_ESPECIAL" ,"TEMAKI"     ,    "URAMAKI"    ,    "VINHO"      ,    "WHISKY"      ,  
+"YAKISSOBA"   )  
+names(productvalue)<- c("id"  ,           "AGUA"     ,      "BACARDI"  ,      "BUFFET"     ,    "BULE_CHA"    ,  "CAFE_EXPRESSO" ,
+                        "CAIPIRINHA"  ,   "CAIPIROSKA"   ,  "CERVEJA"     ,   "CERVEJA_LATA"  , "CHA"      ,      "DOCINHOS"      ,
+                        "HARUMAKI"    ,   "LIMONADA"     ,  "REFRIGERANTE"  , "SAKE"        ,   "SASHIMI"  ,      "SOBREMESA"    , 
+                        "SUCO"        ,   "SUSHI_ESPECIAL" ,"TEMAKI"     ,    "URAMAKI"    ,    "VINHO"      ,    "WHISKY"      ,  
+                        "YAKISSOBA"   )  
+
+
+productorder[is.na(productorder)]<-0
+productvalue[is.na(productvalue)]<-0
+
+qcomandprodctvalue<-merge(productorder,productvalue, by = "id",suffixes = c(".qCom", ".Vpaid"))
+
+#merge in the big dataframe
+receita<-merge(x =receita, y =qcomandprodctvalue, all.x = T, all.y = F)
+```
+
+
+
+
+There are no important difference between average sales by table code. But tables 1 to 50 sells more than tabeles 51 to 99..( tehere are some wierd tables never used, like 12, 20, 50)
+
+
+```{r, echo=TRUE}
+receita %>%group_by(mesa) %>% summarise(sales=sum(vrTotal)) %>% mutate(CumulativeSales=cumsum(sales)) %>% 
+  ggplot()+geom_point(aes(x = mesa, y = CumulativeSales)) + labs(title= "Cumulative sales by table code", x= "Table Code", y ="Sales") +
+  theme_few() +scale_x_continuous(breaks = seq(0,100,by = 5))
+```
+
+##Pattern
+
+he restaurant is opening each week a new dinner service. first week, just monaday and tuesday, second week, 3 days  for dinner, third week 4 days for dinner. ( We can think tha the next week they will open friday to) 
+(because year is beginnig)
+
+
+```{r}
+receita %>% group_by(purchasedate, meal) %>% summarise(sales=sum(vrTotal)) %>% arrange(desc(meal)) %>% mutate(pos=cumsum(sales)-0.5*sales) %>%
+  ggplot() + geom_bar(aes(x = purchasedate, y = sales, fill=meal, label=sales), stat = "identity") +
+  geom_text(aes(x = purchasedate, y = pos, fill=meal, label=dollar(sales)), size=3) + scale_y_continuous(labels=dollar_format()) +labs(title="Sales by day and shift", x="Date", y="Totalsales")
+```
+
+
+
+##Correlations
+
+There are no strong relationship on features, just buffet cunsumption and sales the other featues have no strong relationship and ore have obvious relations. Like when consume whisky there are more sales for the obvious reason that whisky is spensive.
+
+```{r, echo=TRUE, fig.height=15, fig.width=15}
+#CORPPLOT
+corrmatrix<-receita %>% select(-c(weekday,time, meal,purchasedatehour,purchasedate) ) %>% cor()
+library(corrplot)
+corrplot::corrplot(corrmatrix)
+```
+
+
+##Forecast
+
+
+The next week (week 4) there will be sales for  $ 39 281
+
+```{r, echo=TRUE}
+#Naive Lunch forecast
+dflunch<-receita %>% group_by(weeknum=as.numeric(weeknum),weekday, purchasedate, meal) %>% arrange(desc(meal)) %>% summarise(total=sum(vrTotal))
+library(caret)
+
+#randomforest
+control <- trainControl(method="repeatedcv", number=6, repeats=4, search="grid")
+set.seed(1254)
+tunegrid <- expand.grid(.mtry=3, .ntree=500)
+library(randomForest)
+
+modellinardflunchrf <-train(total~weeknum+weekday+meal,data = dflunch, method="rf", metric="RMSE", ntree=1000, trControl=control)
+
+#create empty dates and shifts
+dflunch[27:37,1]<- rep(4)
+dflunch[27:37,2]<- c("Seg","Ter","Qua","Qui","Sex","Sáb","Seg","Ter","Qua","Qui","Sex")
+dflunch[27:32,3] <- seq(as.Date("2016-01-25"), as.Date("2016-01-30"), by = "day")
+dflunch[33:37,3] <- seq(as.Date("2016-01-25"), as.Date("2016-01-29"), by = "day")
+dflunch[27:32,4]<-rep("lunch")
+dflunch[33:37,4]<-rep("dinner")  
+
+
+#forecast random forest
+dflunch[27:37,5]<- predict(modellinardflunchrf, dflunch[27:37,])
+
+#Plot Everything
+dflunch %>% group_by(purchasedate, meal) %>% summarise(sales=sum(total)) %>% arrange(desc(meal)) %>% mutate(pos=cumsum(sales)-0.5*sales) %>%
+  ggplot() + geom_bar(aes(x = purchasedate, y = sales, fill=meal, label=sales), stat = "identity") +
+  geom_text(aes(x = purchasedate, y = pos, fill=meal, label=dollar(sales)), size=3) + scale_y_continuous(labels=dollar_format()) +labs(title="Sales by day and shift", x="Date", y="totalsales")
+
+```
+
+##forecast orders
+
+```{r}
+#Forecast people at the restaurant
+
+dforders<-receita %>% group_by(weeknum=as.numeric(weeknum),weekday, purchasedate, meal) %>% arrange(desc(meal)) %>% summarise(totalorders=n_distinct(id))
+
+#randomforest
+control <- trainControl(method="repeatedcv", number=6, repeats=4, search="grid")
+tunegridFOOD<- expand.grid(.mtry=c(3,4,5))
+modellinardflunchrf <-train(totalorders~weeknum+weekday+meal,data = dforders, method="rf", metric="RMSE", ntree=500, trControl=control, tuneGrid=tunegridFOOD)
+
+#create empty dates and shifts
+dforders[27:37,1]<- rep(4)
+dforders[27:37,2]<- c("Seg","Ter","Qua","Qui","Sex","Sáb","Seg","Ter","Qua","Qui","Sex")
+dforders[27:32,3] <- seq(as.Date("2016-01-25"), as.Date("2016-01-30"), by = "day")
+dforders[33:37,3] <- seq(as.Date("2016-01-25"), as.Date("2016-01-29"), by = "day")
+dforders[27:32,4]<-rep("lunch")
+dforders[33:37,4]<-rep("dinner")  
+
+
+#random forest
+dforders[27:37,5]<- predict(modellinardflunchrf, dforders[27:37,])
+
+dforders %>% group_by(purchasedate, meal) %>% summarise(orders=sum(totalorders)) %>% arrange(desc(meal)) %>% mutate(pos=cumsum(orders)-0.5*orders) %>%
+  ggplot() + geom_bar(aes(x = purchasedate, y = orders, fill=meal, label=orders), stat = "identity") +
+  geom_text(aes(x = purchasedate, y = pos, fill=meal, label=round(orders)), size=3)
+```
+
+
+```{r, echo=TRUE}
+#Forecast orders
+dforders[27:37,] %>% arrange(purchasedate) %>% print(n=30)
+dforders %>% group_by(weeknum) %>% summarise(orders=round(sum(totalorders)))
+
+```
+
+
+##Forecast food, sodas, and aguas.
+
+Just for buffet, sodas and water, are the products with more stock attention. 
+
+```{r, echo=TRUE}
+#QUANTITY OF FOOD
+
+dffood<-receita %>% group_by(weeknum=as.numeric(weeknum),weekday, purchasedate, meal) %>% arrange(desc(meal)) %>% summarise(totalfood=sum(BUFFET.qCom))
+#randomforest
+control <- trainControl(method="repeatedcv", number=6, repeats=4, search="grid")
+set.seed(1254)
+modellinardflunchrf <-train(totalfood~weeknum+weekday+meal,data = dffood, method="rf", metric="RMSE", ntree=300, trControl=control)
+#create empty dates and shifts
+dffood[27:37,1]<- rep(4)
+dffood[27:37,2]<- c("Seg","Ter","Qua","Qui","Sex","Sáb","Seg","Ter","Qua","Qui","Sex")
+dffood[27:32,3] <- seq(as.Date("2016-01-25"), as.Date("2016-01-30"), by = "day")
+dffood[33:37,3] <- seq(as.Date("2016-01-25"), as.Date("2016-01-29"), by = "day")
+dffood[27:32,4]<-rep("lunch")
+dffood[33:37,4]<-rep("dinner")  
+
+#forecast random forest
+dffood[27:37,5]<- predict(modellinardflunchrf, dflunch[27:37,])
+
+dffood %>% group_by(purchasedate, meal) %>% summarise(totalfood=sum(totalfood)) %>% arrange(desc(meal)) %>% mutate(pos=cumsum(totalfood)-0.5*totalfood) %>%
+  ggplot() + geom_bar(aes(x = purchasedate, y = totalfood, fill=meal, label=totalfood), stat = "identity") +
+  geom_text(aes(x = purchasedate, y = pos, fill=meal, label=round(totalfood)), size=3) +labs(title="Kilos of food consumed and forecasted", x="Date", y="Kilograms of food")
+```
+
+The next week there will be consumed 473 kilos of food.
+
+```{r, echo=TRUE}
+#Forecast Buffet
+dffood[27:37,] %>% arrange(purchasedate) %>% print(n=30)
+
+dffood %>% group_by(weeknum) %>% summarise(food=(sum(totalfood)))
+```
+
+```{r}
+#Forecast for Refrigerante (soda)
+
+dfrefri<-receita %>% group_by(weeknum=as.numeric(weeknum),weekday, purchasedate, meal) %>% arrange(desc(meal)) %>% summarise(totalrefri=sum(REFRIGERANTE.qCom))
+#randomforest
+control <- trainControl(method="repeatedcv", number=6, repeats=4, search="grid")
+set.seed(1254)
+modellinardflunchrf <-train(totalrefri~weeknum+weekday+meal,data = dfrefri, method="rf", metric="RMSE", ntree=300, trControl=control)
+#create empty dates and shifts
+dfrefri[27:37,1]<- rep(4)
+dfrefri[27:37,2]<- c("Seg","Ter","Qua","Qui","Sex","Sáb","Seg","Ter","Qua","Qui","Sex")
+dfrefri[27:32,3] <- seq(as.Date("2016-01-25"), as.Date("2016-01-30"), by = "day")
+dfrefri[33:37,3] <- seq(as.Date("2016-01-25"), as.Date("2016-01-29"), by = "day")
+dfrefri[27:32,4]<-rep("lunch")
+dfrefri[33:37,4]<-rep("dinner")  
+
+#forecast random forest
+dfrefri[27:37,5]<- predict(modellinardflunchrf, dfrefri[27:37,])
+
+dfrefri %>% group_by(purchasedate, meal) %>% summarise(totalrefri=sum(totalrefri)) %>% arrange(desc(meal)) %>% mutate(pos=cumsum(totalrefri)-0.5*totalrefri) %>%
+  ggplot() + geom_bar(aes(x = purchasedate, y = totalrefri, fill=meal, label=totalrefri), stat = "identity") +
+  geom_text(aes(x = purchasedate, y = pos, fill=meal, label=round(totalrefri)), size=3) + scale_y_continuous() +labs(title="Number of sodas consumed and forecasted", x="Date", y="Number of sodas")
+
+```
+The next week there will be consumed 569 sodas.
+
+```{r}
+#Forecast soda
+dfrefri[27:37,] %>% arrange(purchasedate) %>% print(n=30)
+
+dfrefri %>% group_by(weeknum) %>% summarise(refri=(sum(totalrefri)))
+```
+
+
+```{r}
+dfagua<-receita %>% group_by(weeknum=as.numeric(weeknum),weekday, purchasedate, meal) %>% arrange(desc(meal)) %>% summarise(totalagua=sum(AGUA.qCom))
+#randomforest
+control <- trainControl(method="repeatedcv", number=6, repeats=4, search="grid")
+set.seed(1254)
+modellinardflunchrf <-train(totalagua~weeknum+weekday+meal,data = dfagua, method="rf", metric="RMSE", ntree=100, trControl=control)
+#create empty dates and shifts
+dfagua[27:37,1]<- rep(4)
+dfagua[27:37,2]<- c("Seg","Ter","Qua","Qui","Sex","Sáb","Seg","Ter","Qua","Qui","Sex")
+dfagua[27:32,3] <- seq(as.Date("2016-01-25"), as.Date("2016-01-30"), by = "day")
+dfagua[33:37,3] <- seq(as.Date("2016-01-25"), as.Date("2016-01-29"), by = "day")
+dfagua[27:32,4]<-rep("lunch")
+dfagua[33:37,4]<-rep("dinner")  
+
+#forecast random forest
+dfagua[27:37,5]<- predict(modellinardflunchrf, dfagua[27:37,])
+
+dfagua %>% group_by(purchasedate, meal) %>% summarise(totalagua=sum(totalagua)) %>% arrange(desc(meal)) %>% mutate(pos=cumsum(totalagua)-0.5*totalagua) %>%
+  ggplot() + geom_bar(aes(x = purchasedate, y = totalagua, fill=meal, label=totalagua), stat = "identity") +
+  geom_text(aes(x = purchasedate, y = pos, fill=meal, label=round(totalagua)), size=3) + scale_y_continuous() +labs(title="Number of water bottles consumed and forecasted", x="Date", y="Number of water bottles")
+
+```
+
+The next week there will be consumed 293 sodas.
+
+```{r}
+dfagua[27:37,] %>% arrange(purchasedate) %>% print(n=30)
+
+dfagua %>% group_by(weeknum) %>% summarise(aguas=(sum(totalagua)))
+```
+
+
+```{r}
+finaldataforecasted<-data.frame(dflunch$purchasedate, 
+                   dflunch$meal,  dflunch$total, dforders$totalorders, dffood$totalfood, dfrefri$totalrefri, dfagua$totalagua)
+
+print(finaldataforecasted)
+
+```
+
